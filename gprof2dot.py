@@ -1282,6 +1282,79 @@ class SharkParser(LineParser):
         return profile
 
 
+class DTraceParser(LineParser):
+    """Parser for DTrace output.
+
+    Author: tom@dbservice.com
+    """
+
+    def __init__(self, infile):
+        LineParser.__init__(self, infile)
+
+        self.profile = Profile()
+        self.profile[TIME] = 0
+
+    def function(self, string, time):
+        match = re.compile('((?P<image>\S+)`)?(?P<symbol>\S+)')
+        mo = match.match(string)
+        if not mo:
+            return
+
+        fields = mo.groupdict('unknown')
+        id = ':'.join([fields.get('image'), fields.get('symbol')])
+
+        try:
+            func = self.profile.functions[id]
+        except KeyError:
+            func = Function(id, fields.get('symbol', 'unknown'));
+            func[TIME] = time;
+
+            self.profile.add_function(func)
+        else:
+            func[TIME] += time
+
+        self.profile[TIME] += time
+            
+        return func
+
+    def call(self, caller, callee):
+        try:
+            call = caller.calls[callee.id]
+        except KeyError:
+            call = Call(callee.id)
+            call[TIME] = callee[TIME];
+
+            caller.add_call(call)
+        else:
+            call[TIME] += callee[TIME]
+
+    def parse(self):
+        self.readline()
+        match = re.compile(r'(?P<caller>\S+)\s(?P<callee>\S+)\s(?P<calls>\d+)\s(?P<time>\d+)')
+
+        while self.lookahead():
+            line = self.consume()
+            mo = match.match(line)
+            if not mo:
+                continue
+
+            fields = mo.groupdict()
+            
+            caller = self.function(str(fields.get('caller', 0)), 0)
+            callee = self.function(str(fields.get('callee', 0)), int(fields.get('time', 0)))
+
+            self.call(caller, callee)    
+
+        # compute derived data
+        self.profile.validate()
+        self.profile.find_cycles()
+        self.profile.ratio(TIME_RATIO, TIME)
+        self.profile.call_ratios(TIME)
+        self.profile.integrate(TOTAL_TIME_RATIO, TIME_RATIO)
+
+        return self.profile
+
+
 class AQtimeTable:
 
     def __init__(self, name, fields):
@@ -1835,9 +1908,9 @@ class Main:
             help="eliminate edges below this threshold [default: %default]")
         parser.add_option(
             '-f', '--format',
-            type="choice", choices=('prof', 'oprofile', 'pstats', 'shark', 'aqtime'),
+            type="choice", choices=('prof', 'oprofile', 'pstats', 'shark', 'aqtime', 'dtrace'),
             dest="format", default="prof",
-            help="profile format: prof, oprofile, shark, aqtime, or pstats [default: %default]")
+            help="profile format: prof, oprofile, shark, aqtime, dtrace or pstats [default: %default]")
         parser.add_option(
             '-c', '--colormap',
             type="choice", choices=('color', 'pink', 'gray', 'bw'),
@@ -1885,6 +1958,12 @@ class Main:
             else:
                 fp = open(self.args[0], 'rt')
             parser = SharkParser(fp)
+        elif self.options.format == 'dtrace':
+            if not self.args:
+                fp = sys.stdin
+            else:
+                fp = open(self.args[0], 'rt')
+            parser = DTraceParser(fp)
         elif self.options.format == 'aqtime':
             if not self.args:
                 fp = sys.stdin
